@@ -1,5 +1,12 @@
-raft_data/
-path_retriever/datasets
-path_retriever/saved_explanations
+outputs/
+*.pt
+*.bin
+*.safetensors
+*.pth
+*.pkl
+*.jsonl
+*.json
+__pycache__/
+*.pyc
 data/
-path_retriever/saved_models
+PaGE-Link/datasets/
