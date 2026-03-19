@@ -4,7 +4,7 @@ from torch_geometric.utils import k_hop_subgraph
 import json
 
 def load_data(file_path):
-    return torch.load(file_path)
+    return torch.load(file_path, weights_only=False)
 
 def load_pickle(file_path):
     with open(file_path, 'rb') as f:

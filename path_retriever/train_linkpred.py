@@ -15,7 +15,7 @@ parser.add_argument('--device_id', type=int, default=-1)
 '''
 Dataset args
 '''
-parser.add_argument('--dataset_dir', type=str, default='datasets')
+parser.add_argument('--dataset_dir', type=str, default='../PaGE-Link/datasets')
 parser.add_argument('--dataset_name', type=str, default='aug_citation')
 parser.add_argument('--valid_ratio', type=float, default=0.1) 
 parser.add_argument('--test_ratio', type=float, default=0.2)
@@ -47,14 +47,6 @@ parser.add_argument('--sample_neg_edges', default=False, action='store_true',
 parser.add_argument('--config_path', type=str, default='', help='path of saved configuration args')
 
 args = parser.parse_args()
-
-# if 'synthetic' in args.dataset_name:
-#     args.src_ntype = 'user'
-#     args.tgt_ntype = 'item'
-
-# elif 'citation' in args.dataset_name:
-#     args.src_ntype = 'author'
-#     args.tgt_ntype = 'paper'
 
 args.src_ntype = 'user'
 args.tgt_ntype = 'item'
@@ -89,16 +81,15 @@ def compute_auc(pos_score, neg_score):
 def run():
     set_seed(0)
     best_val_auc = 0
-    pred_etype= args.pred_etype
+    pred_etype = args.pred_etype
     train_pos_src_nids, train_pos_tgt_nids = train_pos_g.edges(etype=pred_etype)            
     val_pos_src_nids, val_pos_tgt_nids = val_pos_g.edges(etype=pred_etype)            
     val_neg_src_nids, val_neg_tgt_nids = val_neg_g.edges(etype=pred_etype)            
     test_pos_src_nids, test_pos_tgt_nids = test_pos_g.edges(etype=pred_etype)            
     test_neg_src_nids, test_neg_tgt_nids = test_neg_g.edges(etype=pred_etype)            
-
     train_neg_src_nids, train_neg_tgt_nids = train_neg_g.edges(etype=pred_etype) 
 
-    for epoch in range(1, args.num_epochs+1):
+    for epoch in range(1, args.num_epochs + 1):
         train_pos_score = model(train_pos_src_nids, train_pos_tgt_nids, mp_g)   
         if args.sample_neg_edges:
             train_neg_src_nids, train_neg_tgt_nids = negative_sampling(train_pos_g, pred_etype) 
@@ -115,7 +106,8 @@ def run():
                 val_pos_score = model(val_pos_src_nids, val_pos_tgt_nids, mp_g)
                 val_neg_score = model(val_neg_src_nids, val_neg_tgt_nids, mp_g)
                 val_auc = compute_auc(val_pos_score, val_neg_score)
-                print('In epoch {}, loss: {:.4f}, train AUC: {:.4f}, val AUC: {:.4f}'.format(epoch, loss, train_auc, val_auc))
+                print('In epoch {}, loss: {:.4f}, train AUC: {:.4f}, val AUC: {:.4f}'.format(
+                    epoch, loss, train_auc, val_auc))
                 if val_auc > best_val_auc:
                     best_epoch = epoch
                     best_val_auc = val_auc
@@ -127,19 +119,19 @@ def run():
         test_pos_score = model(test_pos_src_nids, test_pos_tgt_nids, mp_g)
         test_neg_score = model(test_neg_src_nids, test_neg_tgt_nids, mp_g)
         test_auc = compute_auc(test_pos_score, test_neg_score)
-        print('Best epoch {}, val AUC: {:.4f}, test AUC: {:.4f}'.format(best_epoch, best_val_auc, test_auc))
+        print('Best epoch {}, val AUC: {:.4f}, test AUC: {:.4f}'.format(
+            best_epoch, best_val_auc, test_auc))
 
 processed_g = load_dataset(args.dataset_dir, args.dataset_name, args.split, args.valid_ratio, args.test_ratio, args.stage)[1]
 mp_g, train_pos_g, train_neg_g, val_pos_g, val_neg_g, test_pos_g, test_neg_g = [g.to(device) for g in processed_g]
 
+# 使用 HeteroRGCN
 encoder = HeteroRGCN(mp_g, args.emb_dim, args.hidden_dim, args.out_dim)
 model = HeteroLinkPredictionModel(encoder, args.src_ntype, args.tgt_ntype, args.link_pred_op, **pred_kwargs)
-# encoder = LightGCN(mp_g, args.emb_dim, 2)
-# model = HeteroLinkPredictionModel(encoder, args.src_ntype, args.tgt_ntype, args.link_pred_op, **pred_kwargs)
 
 model.to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
- 
+
 run()
 
 if args.save_model:
@@ -147,5 +139,6 @@ if args.save_model:
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     torch.save(model.state_dict(), output_dir.joinpath(f"{args.dataset_name}_model_{args.split}.pth"))
+    print(f"Model saved to {output_dir}/{args.dataset_name}_model_{args.split}.pth")
 
-# python train_linkpred.py --dataset_name yelp --save_model
+# python train_linkpred.py --dataset_name yelp --split trn --save_model --device_id 0

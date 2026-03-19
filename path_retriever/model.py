@@ -76,7 +76,10 @@ class HeteroLinkPredictionModel(nn.Module):
         self.tgt_ntype = tgt_ntype
 
     def encode(self, g, feat_nids=None, eweight_dict=None):
-        h = self.encoder(g, feat_nids, eweight_dict)
+        if isinstance(self.encoder, LightGCN):
+            h = self.encoder(g, feat_nids)
+        else:
+            h = self.encoder(g, feat_nids, eweight_dict)
         return h
 
     def forward(self, src_nids, tgt_nids, g, feat_nids=None, eweight_dict=None):

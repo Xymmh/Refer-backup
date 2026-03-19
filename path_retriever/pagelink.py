@@ -30,7 +30,7 @@ parser.add_argument('--device_id', type=int, default=0)
 '''
 Dataset args
 '''
-parser.add_argument('--dataset_dir', type=str, default='datasets')
+parser.add_argument('--dataset_dir', type=str, default='../PaGE-Link/datasets')  # 修复路径
 parser.add_argument('--dataset_name', type=str, default='aug_citation')
 parser.add_argument('--valid_ratio', type=float, default=0.1) 
 parser.add_argument('--test_ratio', type=float, default=0.2)
@@ -103,11 +103,12 @@ set_seed(0)
 processed_g = load_dataset(args.dataset_dir, args.dataset_name, args.split, args.valid_ratio, args.test_ratio, args.stage)[1]
 mp_g, train_pos_g, train_neg_g, val_pos_g, val_neg_g, test_pos_g, test_neg_g = [g.to(device) for g in processed_g]
 
-# encoder = HeteroRGCN(mp_g, args.emb_dim, args.hidden_dim, args.out_dim)
-# model = HeteroLinkPredictionModel(encoder, args.src_ntype, args.tgt_ntype, args.link_pred_op, **pred_kwargs)
-encoder = LightGCN(mp_g, args.emb_dim, 2)
+# 使用 HeteroRGCN（与 train_linkpred.py 一致）
+encoder = HeteroRGCN(mp_g, args.emb_dim, args.hidden_dim, args.out_dim)
 model = HeteroLinkPredictionModel(encoder, args.src_ntype, args.tgt_ntype, args.link_pred_op, **pred_kwargs)
-state = torch.load(f'{args.saved_model_dir}/{args.saved_model_name}_{args.split}_lightgcn.pth', map_location='cpu')
+# encoder = LightGCN(mp_g, args.emb_dim, 2)
+# model = HeteroLinkPredictionModel(encoder, args.src_ntype, args.tgt_ntype, args.link_pred_op, **pred_kwargs)
+state = torch.load(f'{args.saved_model_dir}/{args.saved_model_name}_{args.split}.pth', map_location='cpu')
 model.load_state_dict(state)  
 
 pagelink = PaGELink(model, 
@@ -117,13 +118,10 @@ pagelink = PaGELink(model,
                     num_epochs=args.num_epochs,
                     log=True).to(device)
 
-
 test_src_nids, test_tgt_nids = test_pos_g.edges()
 test_ids = range(test_src_nids.shape[0])
 if args.max_num_samples > 0:
     test_ids = test_ids[:args.max_num_samples]
-
-# mapper = DataMapper('/home/yuhanli/lyh/GRec/data/yelp/data_trn.pt')
 
 pred_edge_to_comp_g_edge_mask = {}
 pred_edge_to_paths = {}
@@ -168,5 +166,6 @@ if args.save_explanation:
     with open(saved_path_explanation_path, "wb") as f:
         pickle.dump(pred_edge_to_paths, f)
 
+print(f"Done. Found paths for {len(pred_edge_to_paths)} edges.")
 
-# python pagelink.py --dataset_name yelp --save_explanation --device_id 0
+# python pagelink.py --dataset_name yelp --split trn --save_explanation --device_id 0

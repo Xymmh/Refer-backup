@@ -53,7 +53,7 @@ def create_dgl_graph(pyg_data, pkl_data):
     bought_by_src, bought_by_dst = buys_dst, buys_src
 
     # Add edges to the graph
-    g.add_edges(buys_src, buys_dst, etype='buys')
+    g.add_edges(buys_src, buys_dst, etype='have_bought')
     g.add_edges(bought_by_src, bought_by_dst, etype='bought_by')
     g.add_edges(likes_src, likes_dst, etype='likes')
 

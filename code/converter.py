@@ -28,7 +28,7 @@ def main():
     unique_items = df['item'].unique()
 
     # Process all splits for titles
-    splits = ['trn', 'val', 'tst']
+    splits = ['trn', 'tst']
     all_pkl_data = {}
     for split in splits:
         with open(f'data/{args.dataset}/{split}.pkl', 'rb') as f:
