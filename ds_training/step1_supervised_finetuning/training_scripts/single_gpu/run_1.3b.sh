@@ -1,4 +1,5 @@
 #!/bin/bash
+export PYTHONPATH=$(cd "$(dirname "$0")/../../.." && pwd):$PYTHONPATH
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 

@@ -1,226 +1,139 @@
+# infer.py - 修复问题1（prompt截取偏移）和问题2（base model路径硬编码）
+# 保留 max_new_tokens=256
+
 import json
-import re
-from pathlib import Path
-from typing import Callable
-import random
 import torch
 from tqdm import tqdm
-from transformers import GenerationConfig, AutoModelForCausalLM, AutoTokenizer
-from typing import Optional, Dict, Sequence, List
+from pathlib import Path
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, GenerationConfig
+from peft import PeftModel
 import argparse
 
 
-CHOICES = ['A', 'B', 'C', 'D', 'E', 'F','G', 'H', 'I', 'J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z']
+def parse_args():
+    parser = argparse.ArgumentParser(description="Inference with fine-tuned RAFT model")
+    parser.add_argument("--model_path", type=str, required=True, help="Path to RAFT LoRA checkpoint")
+    parser.add_argument("--base_model_path", type=str, default="meta-llama/Llama-3.2-3B",
+                        help="Path to base model")  # 修复问题2：改为参数传入，不再硬编码
+    parser.add_argument("--test_file", type=str, default="../../raft_data/yelp/test.json")
+    parser.add_argument("--save_dir", type=str, default="../generated_explanations/yelp")
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--max_new_tokens", type=int, default=256)  # 保持原始默认值
+    parser.add_argument("--use_4bit", action="store_true")
+    parser.add_argument("--max_samples", type=int, default=1000)
+    return parser.parse_args()
 
 
-def extract_last_num(text: str) -> float:
-    text = re.sub(r"(\d),(\d)", "\g<1>\g<2>", text) 
-    res = re.findall(r"(\d+(\.\d+)?)", text)  
-    if len(res) > 0:
-        num_str = res[-1][0]
-        return float(num_str)
-    else:
-        return 0.0
-
-
-def main(
-    args,
-    is_bf16: bool = True,
-):
-    batch_size = args.batch_size
-    print(f"main start, is_bf16:{is_bf16}, batch_size:{batch_size}")
-    
-    model_path = args.model_path
-    model, tokenizer = get_model(model_path, is_bf16=is_bf16)
-    print("model loaded")
-
-    batch_llama = get_batch_llama(model, tokenizer, args)
-
-    if args.save_dir == "":
-        args.save_dir = f"../datasets"
-    Path(args.save_dir).mkdir(parents=True, exist_ok=True)
-    
-                
-    gen_datas_jsonl = Path(args.save_dir) / f"gen_datas.jsonl"
-    start_index = (
-        len(open(gen_datas_jsonl).readlines()) if gen_datas_jsonl.exists() else 0
-    )
-    print(f"start_index: {start_index}")
-
-    test_file = args.save_dir + "/test.json"
-    datas = []
-    with open(test_file, "r") as input_file:
-        for line in input_file:
-            datas.append(line)
-    
-    rec_datas = [json.loads(item) for item in datas]
-    
-    for i in tqdm(range(start_index, len(rec_datas), batch_size)):
-        cur_gsm8k_batch = rec_datas[i : i + batch_size]
-        input_str_list, output_str_list = gsm8k_batch_gen(
-            cur_gsm8k_batch, batch_llama, args
-        )
-        for j, (gsm8k_data, input_str, output_str) in enumerate(
-            zip(cur_gsm8k_batch, input_str_list, output_str_list)
-        ):
-            with open(gen_datas_jsonl, "a") as f:
-                json.dump(
-                    dict(
-                        index=i + j,
-                        source_data=gsm8k_data,
-                        input_str=input_str,
-                        output_str=output_str,
-                    ),
-                    f,
-                )
-                f.write("\n")
-
-
-def gsm8k_batch_gen(
-    cur_gsm8k_batch, batch_llm, args
-):
-    try:
-        curs_gsm8k_questions = [v['prompt'] for v in cur_gsm8k_batch]
-    except:
-        curs_gsm8k_questions = [v['input_prompt'] for v in cur_gsm8k_batch]
-    # prompt_no_input = PROMPT_DICTS['normal_prompt']
-    input_str_list = [q for q in curs_gsm8k_questions]
-    output_str_list = batch_llm(input_str_list)
-    return input_str_list, output_str_list
-
-
-def get_batch_llama(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, args):
-    @torch.inference_mode()
-    def batch_llama(input_strs):
-        input_ids_w_attnmask = tokenizer(
-            input_strs,
-            padding=True,
-            return_tensors="pt",
-        ).to(model.device)
-        
-        output_ids = model.generate(
-            input_ids=input_ids_w_attnmask.input_ids,
-            attention_mask=input_ids_w_attnmask.attention_mask,
-            generation_config=GenerationConfig(
-                max_new_tokens=args.max_tokens,
-                do_sample=False,
-                temperature=0.0,  # t=0.0 raise error if do_sample=True
-            ),
-        ).tolist()
-        
-        real_output_ids = [
-            output_id[len(input_ids_w_attnmask.input_ids[i]) :] for i, output_id in enumerate(output_ids)
-        ]
-        output_strs = tokenizer.batch_decode(real_output_ids, skip_special_tokens=True)
-        return output_strs
-
-    return batch_llama
-
-
-def get_model(model_path: str, is_bf16: bool = False):
-    print(model_path)
-    tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side="left")
-    print(tokenizer.pad_token)
+def load_model_and_tokenizer(model_path, base_model_path, use_4bit=False):
+    print(f"Loading tokenizer from: {model_path}")
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    print('new pad ', tokenizer.pad_token)
-    print(tokenizer.bos_token)
-    print(tokenizer.unk_token)
-    print(tokenizer.eos_token)
-    print(tokenizer.truncation_side)
-    print(tokenizer.padding_side)
+    tokenizer.padding_side = "left"
 
-    if is_bf16:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-             device_map='auto'
+    print(f"Loading base model from: {base_model_path}")
+    if use_4bit:
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_model_path,
+            quantization_config=quant_config,
+            device_map="auto",
+            trust_remote_code=True,
         )
     else:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-        ).cuda()
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_model_path,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+
+    print("Loading LoRA adapter...")
+    model = PeftModel.from_pretrained(base_model, model_path)
+    print("Merging LoRA weights...")
+    model = model.merge_and_unload()
     model.eval()
-    print(model.dtype)
 
     return model, tokenizer
 
 
-def extract_last_num(text: str) -> float:
-    text = re.sub(r"(\d),(\d)", "\g<1>\g<2>", text) 
-    res = re.findall(r"(\d+(\.\d+)?)", text) 
-    if len(res) > 0:
-        num_str = res[-1][0]
-        return float(num_str)
-    else:
-        return 0.0
+def batch_generate(model, tokenizer, prompts, batch_size=4, max_new_tokens=256):
+    generations = []
+
+    for i in tqdm(range(0, len(prompts), batch_size), desc="Generating"):
+        batch_prompts = prompts[i:i+batch_size]
+        inputs = tokenizer(
+            batch_prompts,
+            padding=True,
+            return_tensors="pt",
+            truncation=True
+        ).to(model.device)
+
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+
+        # 修复问题1：用 batch 实际 input_ids 长度截取，而非逐条重新 tokenize
+        # left padding 下所有样本等长，直接取 shape[1] 精确截掉 prompt+padding 部分
+        input_len = inputs.input_ids.shape[1]
+        for j in range(len(batch_prompts)):
+            gen_text = tokenizer.decode(
+                outputs[j][input_len:],
+                skip_special_tokens=True
+            )
+            generations.append(gen_text.strip())
+
+    return generations
+
+
+def main():
+    args = parse_args()
+
+    model, tokenizer = load_model_and_tokenizer(
+        args.model_path, args.base_model_path, args.use_4bit
+    )
+
+    print(f"Loading test data from: {args.test_file}")
+    with open(args.test_file, "r", encoding="utf-8") as f:
+        test_data = [json.loads(line) for line in f if line.strip()]
+
+    if args.max_samples is not None:
+        test_data = test_data[:args.max_samples]
+
+    prompts = [item["prompt"] for item in test_data]
+    print(f"Generating explanations for {len(prompts)} samples...")
+
+    generated_exps = batch_generate(
+        model, tokenizer, prompts, args.batch_size, args.max_new_tokens
+    )
+
+    Path(args.save_dir).mkdir(parents=True, exist_ok=True)
+    output_file = Path(args.save_dir) / "generated_explanations.jsonl"
+    print(f"Saving to: {output_file}")
+
+    with open(output_file, "w", encoding="utf-8") as f:
+        for idx, (item, gen_exp) in enumerate(zip(test_data, generated_exps)):
+            # 对齐作者输出格式：保留 index + source_data + input_str + output_str
+            result = {
+                "index": idx,
+                "source_data": item,          # 完整原始数据（含 uid/iid/prompt/chosen/reject）
+                "input_str": item["prompt"],   # 实际输入给模型的 prompt
+                "output_str": gen_exp,          # 模型生成的内容
+            }
+            f.write(json.dumps(result, ensure_ascii=False) + "\n")
+
+    print("Inference 完成！")
 
 
 if __name__ == "__main__":
-    import fire
-
-    parser = argparse.ArgumentParser(description="Eval the finetued SFT model")
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        help="Path to baseline model",
-        required=True,
-    )
-    parser.add_argument(
-        "--streategy",
-        type=str,
-        help="which streategy to evaluate the model",
-        required=True,
-        choices=['Parallel','Cross']
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        help="batchsize",
-        required=True
-    )
-    parser.add_argument(
-        "--lang_only",
-        type=str,
-        help="specific language to test",
-        default = ''
-    )
-    parser.add_argument(
-        "--shot",
-        type=int,
-        help="how many examples in your prompts",
-        default=4
-    )
-    parser.add_argument(
-        "--shuffle",
-        type= bool,
-        help="whether to shuffle your choices",
-        default = True
-    )
-    parser.add_argument(
-        "--max_tokens",
-        type=int,
-        help="maximum output tokens",
-        default = 1024
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        help="seed",
-        default = 0
-    )
-    parser.add_argument(
-        "--data_path",
-        type=str,
-        help="specific language to test",
-        default = ''
-    )
-    parser.add_argument(
-        "--save_dir",
-        type=str,
-        help="file to store",
-        default=""
-    )
-    args = parser.parse_args()
-
-    fire.Fire(main(args=args))
+    main()
