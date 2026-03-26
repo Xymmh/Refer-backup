@@ -19,7 +19,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--dataset",    type=str,   default="yelp")
 parser.add_argument("--ratio",      type=float, default=0.1)
 parser.add_argument("--input_file", type=str,
-                    default="/home/wangqialun/G-Refer/outputs/grpo_results_v5_prompt.jsonl")
+                    default="/home/wangqialun/G-Refer/outputs/grpo_results_v8.jsonl")
 parser.add_argument("--qwen_model", type=str,   default="Qwen/Qwen3-4B-Instruct-2507")
 args = parser.parse_args()
 

@@ -9,7 +9,7 @@ from peft import PeftModel
 # 配置：按需修改
 # ------------------------------------------------------------------ #
 BASE_MODEL_PATH = "meta-llama/Llama-3.2-3B"
-LORA_PATH       = "outputs/grpo_llama_yelp_v6_recon_fix_v2/epoch1"   # 相对于 G-Refer/ 的路径
+LORA_PATH       = "outputs/collab_llama_yelp_gnn_v2/epoch2"   # 相对于 G-Refer/ 的路径
 MAX_NEW_TOKENS  = 128
 USE_4BIT        = False   # 显存不够时改为 True
 

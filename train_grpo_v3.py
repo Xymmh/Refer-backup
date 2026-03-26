@@ -12,11 +12,11 @@ python train_grpo.py \
   --sft_model_path outputs/collab_llama_yelp_gnn_v2/epoch2 \
   --base_model_path meta-llama/Llama-3.2-3B \
   --raft_path raft_data/yelp/train.json \
-  --output_dir outputs/grpo_llama_yelp_v6_rf2 \
-  --max_samples 5000 --num_epochs 1 --G 6
+  --output_dir outputs/grpo_llama_yelp_v6_rf3 \
+  --max_samples 5000 --num_epochs 1 --G 4
 """
 
-import json, os, argparse
+import json, os, argparse, re
 import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -33,8 +33,8 @@ def parse_args():
     p.add_argument('--sft_model_path',      default='outputs/collab_llama_yelp_gnn_v2/epoch2')
     p.add_argument('--base_model_path',     default='meta-llama/Llama-3.2-3B')
     p.add_argument('--raft_path',           default='raft_data/yelp/train.json')
-    p.add_argument('--output_dir',          default='outputs/grpo_llama_yelp_v6_rf2')
-    p.add_argument('--max_samples',         type=int,   default=1000)
+    p.add_argument('--output_dir',          default='outputs/grpo_llama_yelp_v6_rf3')
+    p.add_argument('--max_samples',         type=int,   default=200)
     p.add_argument('--sft_used_samples',    type=int,   default=40000,
                    help='SFT 已使用的数据条数（从头部），GRPO 从剩余部分尾部往前取')
     p.add_argument('--num_epochs',          type=int,   default=1)
@@ -42,8 +42,8 @@ def parse_args():
                    help='每个 prompt 采样的输出数（组内归一化）')
     p.add_argument('--max_new_tokens',      type=int,   default=256)
     p.add_argument('--lr',                  type=float, default=1e-5)
-    p.add_argument('--alpha',               type=float, default=0.1,  help='R_info 权重')
-    p.add_argument('--beta',                type=float, default=0.8,  help='R_recon 权重')
+    p.add_argument('--alpha',               type=float, default=0.4,  help='R_info 权重')
+    p.add_argument('--beta',                type=float, default=0.5,  help='R_recon 权重')
     p.add_argument('--gamma',               type=float, default=0.1,  help='R_len 权重')
     p.add_argument('--sbert_model',         default='all-MiniLM-L6-v2')
     p.add_argument('--debug_every',         type=int,   default=1)
@@ -106,30 +106,22 @@ def load_model(base_path, sft_path, tokenizer):
 
 
 # ─────────────────────────────────────────────────────────────
-# 3b. 冻结 SFT 参考模型（常驻 CPU，仅计算 R_recon 时上 GPU）
+# 3b. BERT 模型（用于 BERTScore F1 计算 R_recon）
 # ─────────────────────────────────────────────────────────────
-def load_ref_model(base_path, sft_path, tokenizer):
+def load_bert_model(model_name='bert-base-uncased'):
     """
-    加载 SFT checkpoint 作为固定参考模型：
-      - 合并 LoRA → 单一权重，无额外适配器结构
-      - 全部参数冻结（requires_grad=False）
-      - 常驻 CPU（device_map='cpu'），不占 GPU 显存
-      - 计算时由调用方临时移到 GPU，算完立刻移回
+    加载 BERT 用于手动计算 BERTScore F1。
+    常驻 CPU，计算时临时移到 GPU，计算完移回。
     """
-    print(f"[ref_model] Loading SFT ref from {sft_path} (CPU, frozen) ...")
-    base = AutoModelForCausalLM.from_pretrained(
-        base_path,
-        dtype=torch.bfloat16,
-        device_map='cpu',
-    )
-    base.resize_token_embeddings(len(tokenizer))
-    ref = PeftModel.from_pretrained(base, sft_path)
-    ref = ref.merge_and_unload()          # 合并 LoRA，去掉适配器结构
-    ref.eval()
-    for param in ref.parameters():
+    from transformers import BertModel, BertTokenizer
+    print(f"[bert] Loading {model_name} for BERTScore ...")
+    bert_tokenizer = BertTokenizer.from_pretrained(model_name)
+    bert_model     = BertModel.from_pretrained(model_name)
+    bert_model.eval()
+    for param in bert_model.parameters():
         param.requires_grad = False
-    print(f"[ref_model] Ready on CPU, all params frozen.")
-    return ref
+    print(f"[bert] Ready on CPU, all params frozen.")
+    return bert_model, bert_tokenizer
 
 
 # ─────────────────────────────────────────────────────────────
@@ -213,40 +205,119 @@ def extract_path(prompt_text):
     return prompt_text[path_start:end].strip()
 
 
-def compute_r_recon(generated_texts, profile_texts,
-                    ref_model, tokenizer, device):
+# 停用词表（介词、冠词、代词、系动词等）
+STOPWORDS = {
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "as", "is", "are", "was", "were", "be",
+    "been", "being", "have", "has", "had", "do", "does", "did", "will",
+    "would", "could", "should", "may", "might", "shall", "can", "that",
+    "this", "these", "those", "it", "its", "they", "them", "their", "who",
+    "which", "what", "there", "here", "also", "not", "no", "so", "if",
+    "than", "then", "when", "where", "how", "all", "any", "both", "each",
+    "more", "most", "other", "some", "such", "into", "through", "during",
+    "about", "above", "after", "before", "between", "i", "you", "he",
+    "she", "we", "my", "your", "his", "her", "our", "us", "me", "him",
+}
+
+
+def remove_stopwords(text):
+    """去除停用词，返回剩余词用空格拼接。"""
+    words = re.findall(r'\b[a-zA-Z]+\b', text.lower())
+    return ' '.join(w for w in words if w not in STOPWORDS)
+
+
+def extract_middle_nodes(path_text):
     """
-    R_recon = -NLL(path | generated)，使用冻结的 SFT 参考模型计算。
-    给定生成的解释，衡量能否反推出 prompt 中的图路径推理链。
-    生成内容越贴合路径中的中间节点和关联逻辑 → NLL 越低 → 奖励越高。
-    模板化输出与路径无关 → NLL 高 → 惩罚大。
-    ref_model 常驻 CPU；每次前向时整体移到 GPU，算完立刻移回 CPU 释放显存。
+    从路径文本中提取中间节点的 Profile 内容，剔除首尾的目标 user 和目标 item。
+    路径结构：User->Item_mid->User_mid->Item_target（每条路径4个节点）。
+    首节点（目标user）和尾节点（目标item）往往复述 prompt 开头的 profile，
+    剔除后只保留真正有区分度的中间推理节点。
     """
-    import math
-    results = []
-    ref_model.to(device)
+    profiles = re.findall(r'Profile:\s*(.*?)\)', path_text, re.DOTALL)
+    profiles = [p.strip() for p in profiles]
+
+    if len(profiles) <= 2:
+        return ' '.join(profiles)
+
+    # 每条路径4个节点，取中间两个（index 1, 2）
+    middle = []
+    i = 0
+    while i < len(profiles):
+        chunk = profiles[i:i+4]
+        if len(chunk) == 4:
+            middle.extend(chunk[1:3])
+        elif len(chunk) > 2:
+            middle.extend(chunk[1:-1])
+        i += 4
+    return ' '.join(middle) if middle else ' '.join(profiles)
+
+
+def bertscore_f1(gen_texts, ref_texts, bert_model, bert_tokenizer, device):
+    """
+    手动实现 BERTScore F1（token 级语义匹配）：
+      Precision = 对 gen 里每个 token，在 ref 里找最相似的，取均值
+      Recall    = 对 ref 里每个 token，在 gen 里找最相似的，取均值
+      F1        = 调和平均
+    输入文本已去除停用词。
+    """
+    scores = []
+    bert_model.eval()
     with torch.no_grad():
-        for gen_text, profile_text in zip(generated_texts, profile_texts):
-            if not gen_text.strip() or not profile_text.strip():
-                results.append(-1.0)
+        for gen, ref in zip(gen_texts, ref_texts):
+            if not gen.strip() or not ref.strip():
+                scores.append(0.0)
                 continue
 
-            gen_ids     = tokenizer(gen_text,     add_special_tokens=False)['input_ids']
-            profile_ids = tokenizer(profile_text, add_special_tokens=False)['input_ids']
-            gen_len     = len(gen_ids)
+            def encode(text):
+                enc = bert_tokenizer(
+                    text, return_tensors='pt',
+                    truncation=True, max_length=128,
+                    add_special_tokens=True).to(device)
+                out = bert_model(**enc, output_hidden_states=True)
+                # 取最后一层 hidden state，去掉 [CLS] 和 [SEP]
+                emb = out.hidden_states[-1][0, 1:-1, :]
+                # L2 归一化
+                emb = emb / (emb.norm(dim=-1, keepdim=True) + 1e-8)
+                return emb  # (seq_len, hidden)
 
-            # [gen][profile]，只对 profile 部分计算 NLL
-            input_ids = torch.tensor([gen_ids + profile_ids], dtype=torch.long).to(device)
-            labels    = input_ids.clone()
-            labels[0, :gen_len] = -100
+            gen_emb = encode(gen)   # (G, H)
+            ref_emb = encode(ref)   # (R, H)
 
-            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                nll = ref_model(input_ids=input_ids, labels=labels).loss.item()
+            if gen_emb.shape[0] == 0 or ref_emb.shape[0] == 0:
+                scores.append(0.0)
+                continue
 
-            results.append(-nll)
-    ref_model.to('cpu')
+            # 相似度矩阵 (G, R)
+            sim = torch.mm(gen_emb, ref_emb.T)
+
+            precision = sim.max(dim=1).values.mean().item()
+            recall    = sim.max(dim=0).values.mean().item()
+            if precision + recall > 0:
+                f1 = 2 * precision * recall / (precision + recall)
+            else:
+                f1 = 0.0
+            scores.append(f1)
+    return torch.tensor(scores, dtype=torch.float)
+
+
+def compute_r_recon(generated_texts, middle_node_texts,
+                    bert_model, bert_tokenizer, device):
+    """
+    R_recon = BERTScore F1(去停用词后的生成文本, 去停用词后的中间节点文本)
+    衡量生成的解释与路径中间节点的语义重叠程度。
+    中间节点是真正有区分度的推理信息（剔除了首尾user/item复述）。
+    ∈ [0, 1]，越高越好。
+    """
+    # 对生成文本和中间节点文本都去除停用词
+    gen_clean  = [remove_stopwords(t) for t in generated_texts]
+    node_clean = [remove_stopwords(t) for t in middle_node_texts]
+
+    bert_model.to(device)
+    result = bertscore_f1(gen_clean, node_clean,
+                          bert_model, bert_tokenizer, device)
+    bert_model.to('cpu')
     torch.cuda.empty_cache()
-    return torch.tensor(results, dtype=torch.float)
+    return result
 
 
 def compute_r_len(generated_texts, target_min=30, target_max=50):
@@ -270,12 +341,12 @@ def compute_r_len(generated_texts, target_min=30, target_max=50):
     return torch.tensor(scores, dtype=torch.float)
 
 
-def compute_reward(generated_texts, profile_texts, reference_texts,
-                   ref_model, tokenizer, sbert, device,
+def compute_reward(generated_texts, middle_node_texts, reference_texts,
+                   bert_model, bert_tokenizer, sbert, device,
                    alpha, beta, gamma):
     r_info  = compute_r_info(generated_texts, reference_texts, sbert)
-    r_recon = compute_r_recon(generated_texts, profile_texts,
-                               ref_model, tokenizer, device)
+    r_recon = compute_r_recon(generated_texts, middle_node_texts,
+                               bert_model, bert_tokenizer, device)
     r_len   = compute_r_len(generated_texts)
     total   = alpha * r_info + beta * r_recon + gamma * r_len
     return total, r_info, r_recon, r_len
@@ -335,7 +406,7 @@ def train(args):
         tokenizer.pad_token = tokenizer.eos_token
 
     model = load_model(args.base_model_path, args.sft_model_path, tokenizer)
-    ref_model = load_ref_model(args.base_model_path, args.sft_model_path, tokenizer)
+    bert_model, bert_tokenizer = load_bert_model()
     sbert = SentenceTransformer(args.sbert_model)
 
     dataset = GRPODataset(args.raft_path, args.max_samples, args.sft_used_samples)
@@ -354,8 +425,9 @@ def train(args):
             prompt = batch['prompt'][0]
             chosen = batch['chosen'][0]
 
-            # ── 截取图路径推理部分 ────────────────────────────
-            path_text = extract_path(prompt)
+            # ── 截取路径并提取中间节点 ────────────────────────
+            path_text        = extract_path(prompt)
+            middle_node_text = extract_middle_nodes(path_text)
 
             # ── 采样 G 个输出 ────────────────────────────────
             gen_texts = sample_outputs(
@@ -364,8 +436,8 @@ def train(args):
 
             # ── 计算奖励 ─────────────────────────────────────
             rewards, r_info, r_recon, r_len = compute_reward(
-                gen_texts, [path_text] * args.G, [chosen] * args.G,
-                ref_model, tokenizer, sbert, device,
+                gen_texts, [middle_node_text] * args.G, [chosen] * args.G,
+                bert_model, bert_tokenizer, sbert, device,
                 args.alpha, args.beta, args.gamma)
 
             # ── 组内归一化 → advantage ───────────────────────
@@ -377,8 +449,11 @@ def train(args):
             if steps % args.debug_every == 0:
                 best_idx = rewards.argmax().item()
                 print(f"\n[debug step={steps}]")
-                print(f"  path (recon target) : {path_text[:120]!r}")
-                print(f"  chosen              : {chosen[:80]!r}")
+                node_clean_dbg = remove_stopwords(middle_node_text)
+                print(f"  path raw        : {path_text[:100]!r}")
+                print(f"  middle nodes    : {middle_node_text[:120]!r}")
+                print(f"  nodes(no stop)  : {node_clean_dbg[:120]!r}")
+                print(f"  chosen          : {chosen[:80]!r}")
                 print(f"  {'─'*56}")
                 for i, (t, r, adv) in enumerate(
                         zip(gen_texts, rewards.tolist(), advantages)):

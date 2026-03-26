@@ -12,13 +12,13 @@ from tqdm import tqdm
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--model_path',  default='meta-llama/Llama-3.2-3B')
-    p.add_argument('--output_dir',  default='outputs/grpo_llama_yelp_v6_recon_fix_v2/epoch1')
+    p.add_argument('--output_dir',  default='outputs/grpo_llama_yelp_v6_bart4/epoch1')
     p.add_argument('--test_path',   default='raft_data/yelp/test.json')
-    p.add_argument('--save_path',   default='outputs/grpo_results_v6_recon_fix_v2.jsonl')
+    p.add_argument('--save_path',   default='outputs/grpo_results_v6_bart4.jsonl')
     p.add_argument('--max_samples', type=int, default=-1,
                    help='调试用，-1表示全量')
     p.add_argument('--batch_size',  type=int, default=4)
-    p.add_argument('--max_new_tokens', type=int, default=80)
+    p.add_argument('--max_new_tokens', type=int, default=256)
     p.add_argument('--max_length',  type=int, default=1200)
     return p.parse_args()
 
@@ -65,7 +65,7 @@ def main():
     results = []
     for i in tqdm(range(0, len(samples), args.batch_size), desc="Inferencing"):
         batch = samples[i: i + args.batch_size]
-        prompts = [s['prompt'] + ' ###' for s in batch]  # 引导模型以###开头续写
+        prompts = [s['prompt'] for s in batch]  # 引导模型以###开头续写
 
         enc = tokenizer(
             prompts,

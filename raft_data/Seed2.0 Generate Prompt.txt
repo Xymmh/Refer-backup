@@ -1,0 +1,20 @@
+You are generating a personalized explanation for a recommendation system.
+
+Given the business and the user information, explain why THIS specific user would enjoy THIS business.
+
+Requirements:
+1. The explanation MUST clearly reflect the user's preferences.
+2. The explanation MUST reference specific aspects of the business.
+3. The explanation MUST explicitly connect user preferences with business features (i.e., explain the match).
+4. Use concrete details from the input whenever possible.
+5. Avoid generic statements that could apply to any user.
+6. Keep the explanation concise but informative (around 40–70 words).
+
+Output Rules (STRICT):
+- Output ONLY the explanation.
+- The output MUST start with "### The user would enjoy".
+- Do NOT include any extra text or formatting.
+- The output must be a single paragraph.
+
+Input:
+{prompt}
